@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Google Identity Services Authorization Token model</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://apis.google.com/js/api.js" onload="initClient()" async defer></script>
+    <script src="https://accounts.google.com/gsi/client" onload="initTokenClient()" async defer></script>
+    <script>
+      let client;
+      let tokenClient;
+
+      function initClient() {
+        // https://developers.google.com/discovery/v1/reference/apis/list
+        const discoveryRestUrls = {
+          sheets: 'https://sheets.googleapis.com/$discovery/rest?version=v4',
+        };
+        new Promise((callback, onerror) => { 
+          gapi.load('client', { callback, onerror });
+        })
+        .then(() => {
+          return gapi.client.init({
+            discoveryDocs: [  // preload apis 
+              discoveryRestUrls.sheets,
+            ]
+          });
+        })
+        .then(() => { 
+          client = gapi.client;
+          const [token] = [window.localStorage.getItem('token')].map(JSON.parse);
+          if (token?.access_token) {
+            gapi.client.setToken(token);
+          }
+          console.log('client initialized');
+          updateUi({ clientIniitialized: true });
+         });
+      }
+      function initTokenClient() {
+        scopes = [
+          'https://www.googleapis.com/auth/spreadsheets.readonly',
+        ];
+        // https://developers.google.com/identity/oauth2/web/guides/use-token-model
+        // https://console.cloud.google.com/apis/credentials/oauthclient/588879659786-96ialt5l1bn240naa55eh7gberlo66ds.apps.googleusercontent.com
+        tokenClient = google.accounts.oauth2.initTokenClient({  // implicit grant flow
+          client_id: '588879659786-96ialt5l1bn240naa55eh7gberlo66ds.apps.googleusercontent.com',
+          scope: scopes.join(' '),
+          prompt: '',  // instead of `consent`
+          callback: ''
+        });
+        console.log('token client initialized');
+        updateUi({ tokenClientIniitialized: true });
+      }
+      function getToken() {
+        return new Promise((resolve, reject) => {
+          tokenClient.callback = ({ error }) => {
+            if (error) { reject(error) }
+            else { resolve() }  // gapi.client.getToken() is updated automatically
+          };
+          tokenClient.requestAccessToken();
+        })
+        .then(() => { 
+          window.localStorage.setItem('token', JSON.stringify(gapi.client.getToken()));
+          console.log('authenticated');
+          updateUi({ authenticated: true });
+        });
+      }
+      function revokeToken() {
+        const credentials = gapi.client.getToken();
+        if (credentials) {
+          google.accounts.oauth2.revoke(credentials.access_token, () => { 
+            gapi.client.setToken('');
+            window.localStorage.removeItem('token');
+            console.log('token revoked');
+            updateUi({ tokenRemoved: true });
+          });
+        }
+      }
+      function loadSpreadsheetValues() {
+        // https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets.values/get
+        gapi.client.sheets.spreadsheets.values.get({ 
+          spreadsheetId: '1ZX6U4o0rUuA-uj2UbwDNSd-JhJBeqb6WkwsEWh_ARWs',
+          range: 'BAL',  
+        })
+        .then(spreadsheetValuesResponse => { 
+          console.log('spreadsheet values reponse', spreadsheetValuesResponse);
+          updateUi({ spreadsheetValuesResponse });
+        })
+        .catch((error) => {
+          if (error?.status === 401 || error?.status === 403) {
+            gapi.client.setToken('');
+            window.localStorage.removeItem('token');
+            console.log('unauthorized');
+            updateUi({ unauthorized: true });
+          }
+        });
+      }
+      function handleTBodyClick({ header, filter }, event) {
+        if (event.target instanceof HTMLTableCellElement) {
+          const col = header[event.target.cellIndex];
+          if (['DT','ACCT'].includes(col)) {
+            if (filter.has(col)) {
+              filter.delete(col);
+            } else {
+              filter.add(col);
+            }
+            const dataset = event.target.parentElement.dataset;
+            const attributes = [
+              filter.has('DT') && dataset.month && `[data-month='${dataset.month}']`,
+              filter.has('ACCT') && dataset.account && `[data-account='${dataset.account}']`,
+            ].filter(Boolean).join('');
+
+            console.log(filter, dataset, attributes);
+
+            let lastDt;
+            let highlight = true;
+            if (attributes) {
+              this.querySelectorAll(`tr:not(:where(tr${attributes}))`).forEach(tr => { 
+                tr.classList.toggle('d-none', true);
+              });
+              this.querySelectorAll(`tr${attributes}`).forEach(tr => { 
+                tr.classList.toggle('d-none', false);
+                if (lastDt !== tr.dataset.date) {
+                  highlight = !highlight;
+                  lastDt = tr.dataset.date;
+                }
+                tr.classList.toggle('highlighted', highlight);
+              });
+            } else {
+              this.querySelectorAll('tr').forEach(tr => { 
+                tr.classList.toggle('d-none', false);
+                if (lastDt !== tr.dataset.date) {
+                  highlight = !highlight;
+                  lastDt = tr.dataset.date;
+                }
+                tr.classList.toggle('highlighted', highlight);
+              });
+            }
+          }
+        }
+      }
+      function updateUi(event = {}) {
+        if (client && tokenClient) {
+          [document.querySelector('.btn-login')].filter(Boolean).forEach(el => {
+            el.disabled = !!client.getToken();
+            el.classList.toggle('d-none', !!client.getToken());
+          });
+          [document.querySelector('.btn-spreadsheet-values')].filter(Boolean).forEach(el => {
+            el.disabled = !client.getToken();
+          });
+          [document.querySelector('.btn-logout')].filter(Boolean).forEach(el => {
+            el.disabled = !client.getToken();
+            el.classList.toggle('d-none', !client.getToken());
+          });
+          [document.querySelector('.div-result')].filter(Boolean).forEach(el => {
+            el.classList.toggle('d-none', !client.getToken());
+          });
+        }
+        if (event.spreadsheetValuesResponse?.status === 200) {
+          [document.querySelector('.div-result table')].filter(Boolean).forEach(table => {
+            const { values } = event.spreadsheetValuesResponse.result;
+            const index = new Map(values[0].map((x,i) => [x,i]));
+            const header = values.shift().filter(x => ['DT','AMNT','ACCT'].includes(x));
+
+            [document.createElement('thead')].forEach(thead => {
+              table.tHead?.remove();
+              [document.createElement('tr')].forEach(tr => {
+                header.map(col => [document.createTextNode(col), document.createElement('th')])
+                  .forEach(([text, th]) => {
+                    th.appendChild(text);
+                    tr.appendChild(th);
+                  });
+                thead.appendChild(tr);
+              });
+              table.appendChild(thead);
+            });
+
+            [document.createElement('tbody')].forEach(tbody => {
+              const [tBody] = Array.from(table.tBodies);
+              tBody?.remove();
+              let lastDt;
+              let highlight = true;
+              values.map(row => [row, document.createElement('tr')])
+                .forEach(([row, tr]) => {
+                  header.map(col => row[index.get(col)])
+                    .map(cell => [document.createTextNode(cell), document.createElement('td')])
+                    .forEach(([text, td]) => {
+                      td.appendChild(text);
+                      tr.appendChild(td);
+                    });
+
+                  tr.dataset.account = row[index.get('ACCT')];
+                  tr.dataset.month = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'numeric' }).format(new Date(row[index.get('DT')]));
+                  tr.dataset.date = row[index.get('DT')];
+
+                  if (lastDt !== tr.dataset.date) {
+                    highlight = !highlight;
+                    lastDt = tr.dataset.date;
+                  }
+                  tr.classList.toggle('highlighted', highlight);
+
+                  tbody.appendChild(tr);
+                });
+              tbody.addEventListener('click', handleTBodyClick.bind(tbody, { header, filter: new Set() }));
+              table.appendChild(tbody);
+            });
+          });
+        }
+        if (event.authenticated) {
+          loadSpreadsheetValues();
+        }
+        if (event.clientIniitialized && tokenClient) {
+          if (gapi.client.getToken()?.access_token) {
+            loadSpreadsheetValues();
+          }
+        } 
+        if (event.tokenClientIniitialized && client) {
+          if (gapi.client.getToken()?.access_token) {
+            loadSpreadsheetValues();
+          }
+        }
+      }
+    </script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        margin: 0px;
+        padding: 8px;
+        position: absolute;
+        row-gap: 8px;
+        width: 100%;
+      }
+      .div-result {
+        flex: 1 1 auto;
+        overflow: auto;
+      }
+      .div-result table {
+        border-spacing: 0px;
+        width: 100%;
+      }
+      .div-result table thead tr {
+        background-color: gray;
+        color: white;
+        position: sticky;
+        top: 0px;
+      }
+      .d-none {
+        display: none;
+      }
+      .highlighted {
+        background-color: lightgray;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      <button class="btn-login d-none" onclick="getToken()" disabled>Get access token</button>
+      <button class="btn-spreadsheet-values d-none" onclick="loadSpreadsheetValues()" disabled>Load values</button>
+      <button class="btn-logout d-none" onclick="revokeToken()" disabled>Revoke token</button>
+    </div>
+    <div class="div-result d-none">
+      <table></table>
+    </div>
+  </body>
+</html>
